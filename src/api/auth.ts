@@ -239,7 +239,7 @@ app.get('/me', requireAuth, async (c) => {
         createdAt: users.createdAt,
       })
       .from(users)
-      .where(eq(users.id, auth.userId))
+      .where(eq(users.id, auth.user.id))
       .limit(1);
 
     if (!user.length) {

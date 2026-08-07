@@ -4,6 +4,7 @@
  */
 
 import { relations } from 'drizzle-orm';
+import { uuidv7 } from 'uuidv7';
 import {
   index,
   integer,
@@ -18,7 +19,7 @@ import { productCategories } from './products';
 const id = () =>
   uuid('id')
     .primaryKey()
-    .$defaultFn(() => require('uuidv7').uuidv7());
+    .$defaultFn(() => uuidv7());
 
 const timestamps = {
   createdAt: timestamp('created_at', { withTimezone: true })
