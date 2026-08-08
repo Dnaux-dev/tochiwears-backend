@@ -15,7 +15,8 @@ import {
   uuid,
   boolean,
 } from 'drizzle-orm/pg-core';
-import { users, productVariants } from './index';
+import { users } from './auth';
+import { productVariants } from './products';
 
 const id = () =>
   uuid('id')

@@ -1,9 +1,11 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import productsApi from './api/products';
+import cartApi from './api/cart';
+import ordersApi from './api/orders';
 import adminApi from './api/admin';
 import authApi from './api/auth';
-import { requireAdmin, optionalAuth } from './lib/middleware';
+import { requireAuth, requireAdmin } from './lib/middleware';
 
 const app = new Hono();
 
@@ -15,7 +17,7 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
    ======================================== */
 
 // Products (public, no auth needed)
-app.route('/api', productsApi);
+app.route('/api/products', productsApi);
 
 /* ========================================
    AUTH ROUTES
@@ -25,7 +27,19 @@ app.route('/api', productsApi);
 app.route('/auth', authApi);
 
 /* ========================================
-   ADMIN API (PROTECTED)
+   CUSTOMER ROUTES (PROTECTED)
+   ======================================== */
+
+// Cart (requires authentication)
+app.use('/cart/*', requireAuth);
+app.route('/cart', cartApi);
+
+// Orders (requires authentication)
+app.use('/orders/*', requireAuth);
+app.route('/orders', ordersApi);
+
+/* ========================================
+   ADMIN API (PROTECTED + ADMIN ROLE)
    ======================================== */
 
 // Protect all admin routes with requireAdmin middleware
@@ -34,19 +48,50 @@ app.route('/admin', adminApi);
 
 const port = 3000;
 console.log(`🚀 Server running on http://localhost:${port}`);
-console.log(`📚 Routes:`);
-console.log(`   Public API:`);
-console.log(`     GET    /api/products`);
-console.log(`     GET    /api/products/:slug`);
-console.log(`   Auth:`);
-console.log(`     POST   /auth/signup`);
-console.log(`     POST   /auth/login`);
-console.log(`     POST   /auth/logout`);
-console.log(`     GET    /auth/me`);
-console.log(`   Admin (protected):`);
-console.log(`     POST   /admin/products`);
-console.log(`     GET    /admin/products`);
-console.log(`     PATCH  /admin/products/:id`);
+console.log(`
+📚 Routes:
+
+PUBLIC API (no auth):
+  GET    /api/products
+  GET    /api/products/:slug
+
+AUTH (public):
+  POST   /auth/signup
+  POST   /auth/login
+  POST   /auth/logout
+  POST   /auth/verify-email
+  POST   /auth/request-password-reset
+  POST   /auth/reset-password
+  GET    /auth/me (requires token)
+
+CUSTOMER (requires token):
+  GET    /cart
+  POST   /cart
+  PATCH  /cart/:itemId
+  DELETE /cart/:itemId
+  DELETE /cart
+
+  GET    /orders
+  POST   /orders
+  GET    /orders/:orderId
+
+ADMIN (requires token + admin role):
+  POST   /admin/products
+  GET    /admin/products
+  PATCH  /admin/products/:id
+  DELETE /admin/products/:id
+  POST   /admin/products/:productId/variants
+  PATCH  /admin/variants/:variantId
+  DELETE /admin/variants/:variantId
+  PATCH  /admin/inventory/:variantId
+  GET    /admin/inventory/:variantId/movements
+  GET    /admin/inventory/low-stock
+  POST   /admin/categories
+  GET    /admin/categories
+  PATCH  /admin/categories/:id
+  DELETE /admin/categories/:id
+  GET    /admin/stats
+`);
 
 serve({
   fetch: app.fetch,
