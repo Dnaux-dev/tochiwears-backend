@@ -10,7 +10,7 @@ const app = new Hono();
  * GET /api/products
  * List all published products
  */
-app.get('/products', async (c) => {
+app.get('/', async (c) => {
   try {
     const allProducts = await db
       .select()
@@ -29,7 +29,7 @@ app.get('/products', async (c) => {
  * GET /api/products/:slug
  * Get product + variants + inventory
  */
-app.get('/products/:slug', async (c) => {
+app.get('/:slug', async (c) => {
   try {
     const slug = c.req.param('slug');
 

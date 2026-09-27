@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
+import { cors } from 'hono/cors';
 import productsApi from './api/products';
 import cartApi from './api/cart';
 import ordersApi from './api/orders';
@@ -8,6 +9,17 @@ import authApi from './api/auth';
 import { requireAuth, requireAdmin } from './lib/middleware';
 
 const app = new Hono();
+
+// Enable CORS for frontend requests
+app.use(
+  '*',
+  cors({
+    origin: (origin) => origin || '*',
+    allowHeaders: ['Content-Type', 'Authorization'],
+    allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    credentials: true,
+  })
+);
 
 // Health check
 app.get('/health', (c) => c.json({ status: 'ok' }));
@@ -31,11 +43,11 @@ app.route('/auth', authApi);
    ======================================== */
 
 // Cart (requires authentication)
-app.use('/cart/*', requireAuth);
+app.use('/cart*', requireAuth);
 app.route('/cart', cartApi);
 
 // Orders (requires authentication)
-app.use('/orders/*', requireAuth);
+app.use('/orders*', requireAuth);
 app.route('/orders', ordersApi);
 
 /* ========================================
@@ -43,11 +55,11 @@ app.route('/orders', ordersApi);
    ======================================== */
 
 // Protect all admin routes with requireAdmin middleware
-app.use('/admin/*', requireAdmin);
+app.use('/admin*', requireAdmin);
 app.route('/admin', adminApi);
 
-const port = 3000;
-console.log(`🚀 Server running on http://localhost:${port}`);
+const port = Number(process.env.PORT) || 3000;
+console.log(`🚀 Server running on port ${port}`);
 console.log(`
 📚 Routes:
 

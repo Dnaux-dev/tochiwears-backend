@@ -1,6 +1,7 @@
 
 
 import { relations } from 'drizzle-orm';
+import { categories } from './categories';
 import { uuidv7 } from 'uuidv7';
 import {
     bigint,
@@ -161,10 +162,22 @@ export const productVariants = pgTable(
 /* Relations                                                           */
 /* ------------------------------------------------------------------ */
 
+// products.ts
 export const productsRelations = relations(products, ({ many }) => ({
-    variants: many(productVariants),
-    images: many(productImages),
-    categories: many(productCategories),
+  productCategories: many(productCategories),
+  variants: many(productVariants),
+  images: many(productImages),
+}));
+
+export const productCategoriesRelations = relations(productCategories, ({ one }) => ({
+  product: one(products, {
+    fields: [productCategories.productId],
+    references: [products.id],
+  }),
+  category: one(categories, {
+    fields: [productCategories.categoryId],
+    references: [categories.id],
+  }),
 }));
 
 export const productVariantsRelations = relations(

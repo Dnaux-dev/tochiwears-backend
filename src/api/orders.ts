@@ -149,7 +149,7 @@ app.post('/', requireAuth, async (c) => {
         .limit(1);
 
       if (coupon) {
-        if (coupon.type === 'fixed') {
+        if (coupon.type === 'fixed_amount') {
           discountKobo = coupon.value;
         } else if (coupon.type === 'percentage') {
           discountKobo = Math.round((subtotalKobo * coupon.value) / 100);

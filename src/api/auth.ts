@@ -25,6 +25,7 @@ import {
   normalizePhoneNumber,
 } from '@/lib/auth';
 import { requireAuth, getAuth } from '@/lib/middleware';
+import { sendVerificationEmail, sendPasswordResetEmail } from '@/lib/email';
 
 const app = new Hono();
 
@@ -105,6 +106,9 @@ app.post('/signup', async (c) => {
       token: verifyToken,
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     });
+
+    // Send verification email
+    await sendVerificationEmail(email, verifyToken);
 
     return c.json(
       {
@@ -293,9 +297,8 @@ app.post('/request-password-reset', async (c) => {
       expiresAt,
     });
 
-    // TODO: Send email with reset link
-    // const resetLink = `${process.env.CLIENT_URL}/reset-password?token=${token}`;
-    // await sendEmail(email, 'Reset your password', `Click here: ${resetLink}`);
+    // Send email with reset link
+    await sendPasswordResetEmail(email, token);
 
     return c.json({
       message: 'If email exists, a reset link has been sent',

@@ -4,7 +4,7 @@
  *
  * Usage:
  *   import { products, categories, inventory } from '@/db/schema';
- */
+ */ 
 
 // Categories
 export {
@@ -92,4 +92,5 @@ export {
   type NewOrderItem,
   type DeliveryZone,
   type Coupon,
+  couponType,   
 } from './orders';

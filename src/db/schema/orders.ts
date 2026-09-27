@@ -14,9 +14,12 @@ import {
   timestamp,
   uuid,
   boolean,
+  primaryKey,
 } from 'drizzle-orm/pg-core';
 import { users } from './auth';
 import { productVariants } from './products';
+export const couponType = pgEnum("coupon_type", ["percentage", "fixed_amount"]);
+
 
 const id = () =>
   uuid('id')
@@ -102,7 +105,6 @@ export const orderStatus = pgEnum('order_status', [
   'refunded', // Refund issued
 ]);
 
-export const couponType = pgEnum('coupon_type', ['fixed', 'percentage']);
 
 /**
  * Main order record
@@ -233,7 +235,7 @@ export const coupons = pgTable(
     description: text('description'),
 
     // Discount type
-    type: couponType('type').notNull(),
+    type: couponType("type").notNull(),
     value: bigint('value', { mode: 'number' }).notNull(), // In kobo if fixed, % if percentage
 
     // Limits
