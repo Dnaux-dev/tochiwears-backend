@@ -41,7 +41,6 @@ export {
   inventoryRelations,
   inventoryMovementsRelations,
   stockReservationsRelations,
-  POST_MIGRATION_SQL,
   type Inventory,
   type NewInventory,
   type InventoryMovement,

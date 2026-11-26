@@ -1,24 +1,58 @@
 /**
  * Tochiwears — Admin API
- * Full CRUD for products, variants, inventory, categories
+ * Mounted behind requireAdmin in src/index.ts.
  */
 
-import { Hono } from 'hono';
-import { sql, eq, and, isNull } from 'drizzle-orm';
+import { Hono, type Context } from 'hono';
+import { and, asc, desc, eq, ilike, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db } from '@/db';
 import {
+  categories,
+  inventory,
+  inventoryMovements,
+  orders,
+  productCategories,
+  productImages,
   products,
   productVariants,
-  inventory,
-  categories,
-  inventoryMovements,
-  stockMovementReason,
-  type NewProduct,
-  type NewProductVariant,
+  users,
 } from '@/db/schema';
-import { uuidv7 } from 'uuidv7';
+import { getAuth, type AppEnv } from '@/lib/middleware';
+import { ApiError, parseBody, parseQuery } from '@/lib/http';
+import { imageUrl } from '@/lib/catalog';
+import { getOrderWithItems, transitionOrder } from '@/lib/orders';
+import {
+  addProductImageSchema,
+  adminOrderListSchema,
+  createCategorySchema,
+  createProductSchema,
+  createVariantSchema,
+  paginationSchema,
+  setProductCategoriesSchema,
+  updateCategorySchema,
+  updateInventorySchema,
+  updateOrderStatusSchema,
+  updateProductSchema,
+  updateVariantSchema,
+  uuidParam,
+} from '@/lib/validation';
+import { z } from 'zod';
 
-const app = new Hono();
+const app = new Hono<AppEnv>();
+
+const idParam = (c: Context, name: string) => uuidParam.parse(c.req.param(name));
+
+/** Drop undefined keys so PATCH only touches fields the client sent. */
+function definedOnly<T extends Record<string, unknown>>(obj: T): Partial<T> {
+  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
+function assertNonEmpty(patch: object) {
+  if (!Object.keys(patch).length) throw new ApiError(400, 'No fields to update');
+}
+
+/** Statuses that count as revenue. */
+const REVENUE_STATUSES = ['paid', 'processing', 'shipped', 'delivered'] as const;
 
 /* ========================================
    PRODUCTS
@@ -26,160 +60,223 @@ const app = new Hono();
 
 /**
  * POST /admin/products
- * Create a new product
  */
 app.post('/products', async (c) => {
-  const body = await c.req.json();
+  const { categoryIds, ...input } = await parseBody(c, createProductSchema);
 
-  const {
-    slug,
-    name,
-    description,
-    status = 'draft',
-    featured = false,
-    metaTitle,
-    metaDescription,
-  } = body;
-
-  if (!slug || !name) {
-    return c.json(
-      { error: 'slug and name are required' },
-      400
-    );
-  }
-
-  try {
-    const result = await db
+  const product = await db.transaction(async (tx) => {
+    const [created] = await tx
       .insert(products)
-      .values({
-        slug,
-        name,
-        description: description || null,
-        status,
-        featured,
-        metaTitle: metaTitle || null,
-        metaDescription: metaDescription || null,
-      })
+      .values({ ...input, publishedAt: input.status === 'published' ? new Date() : null })
       .returning();
-
-    return c.json({ data: result[0] }, 201);
-  } catch (err: any) {
-    if (err.message.includes('duplicate')) {
-      return c.json({ error: 'slug must be unique' }, 400);
+    if (categoryIds?.length) {
+      await tx
+        .insert(productCategories)
+        .values([...new Set(categoryIds)].map((categoryId) => ({ productId: created.id, categoryId })));
     }
-    return c.json({ error: err.message }, 500);
-  }
+    return created;
+  });
+
+  return c.json({ data: product }, 201);
 });
 
 /**
- * GET /admin/products
- * List all products (including drafts)
+ * GET /admin/products?status=draft
+ * All non-deleted products (any status) with variant count and total stock.
  */
 app.get('/products', async (c) => {
-  try {
-    const allProducts = await db
-      .select()
-      .from(products)
-      .where(isNull(products.deletedAt))
-      .orderBy(products.name);
+  const { status } = parseQuery(
+    c,
+    z.object({ status: z.enum(['draft', 'published', 'archived']).optional() }),
+  );
 
-    return c.json({ data: allProducts });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  const data = await db
+    .select({
+      product: products,
+      variantCount: sql<number>`count(${productVariants.id})`.mapWith(Number),
+      totalStock: sql<number>`coalesce(sum(${inventory.quantity}), 0)`.mapWith(Number),
+    })
+    .from(products)
+    .leftJoin(
+      productVariants,
+      and(eq(productVariants.productId, products.id), isNull(productVariants.deletedAt)),
+    )
+    .leftJoin(inventory, eq(inventory.variantId, productVariants.id))
+    .where(and(isNull(products.deletedAt), status ? eq(products.status, status) : undefined))
+    .groupBy(products.id)
+    .orderBy(asc(products.name));
+
+  return c.json({
+    data: data.map((r) => ({ ...r.product, variantCount: r.variantCount, totalStock: r.totalStock })),
+  });
 });
 
 /**
  * GET /admin/products/:id
- * Get product with variants
+ * Product with variants (+ inventory), images and categories.
  */
 app.get('/products/:id', async (c) => {
-  const id = c.req.param('id');
+  const id = idParam(c, 'id');
 
-  try {
-    const product = await db
-      .select()
-      .from(products)
-      .where(and(eq(products.id, id), isNull(products.deletedAt)))
-      .limit(1);
+  const [product] = await db
+    .select()
+    .from(products)
+    .where(and(eq(products.id, id), isNull(products.deletedAt)))
+    .limit(1);
+  if (!product) throw new ApiError(404, 'Product not found');
 
-    if (!product.length) {
-      return c.json({ error: 'Product not found' }, 404);
-    }
-
-    const variants = await db
-      .select()
+  const [variants, images, cats] = await Promise.all([
+    db
+      .select({
+        variant: productVariants,
+        quantity: inventory.quantity,
+        lowStockThreshold: inventory.lowStockThreshold,
+        allowBackorder: inventory.allowBackorder,
+      })
       .from(productVariants)
-      .where(eq(productVariants.productId, id));
+      .leftJoin(inventory, eq(inventory.variantId, productVariants.id))
+      .where(and(eq(productVariants.productId, id), isNull(productVariants.deletedAt)))
+      .orderBy(asc(productVariants.position)),
+    db
+      .select()
+      .from(productImages)
+      .where(eq(productImages.productId, id))
+      .orderBy(asc(productImages.position)),
+    db
+      .select({ id: categories.id, slug: categories.slug, name: categories.name })
+      .from(productCategories)
+      .innerJoin(categories, eq(productCategories.categoryId, categories.id))
+      .where(eq(productCategories.productId, id)),
+  ]);
 
-    return c.json({
-      data: {
-        ...product[0],
-        variants,
-      },
-    });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  return c.json({
+    data: {
+      ...product,
+      variants: variants.map((v) => ({
+        ...v.variant,
+        inventory: {
+          quantity: v.quantity ?? 0,
+          lowStockThreshold: v.lowStockThreshold,
+          allowBackorder: v.allowBackorder ?? false,
+        },
+      })),
+      images: images.map((i) => ({ ...i, url: imageUrl(i.storageKey) })),
+      categories: cats,
+    },
+  });
 });
 
 /**
  * PATCH /admin/products/:id
- * Update product
+ * Setting status to "published" the first time stamps publishedAt.
  */
 app.patch('/products/:id', async (c) => {
-  const id = c.req.param('id');
-  const body = await c.req.json();
+  const id = idParam(c, 'id');
+  const patch = definedOnly(await parseBody(c, updateProductSchema));
+  assertNonEmpty(patch);
 
-  const { name, description, status, featured, metaTitle, metaDescription } =
-    body;
+  const [updated] = await db
+    .update(products)
+    .set({
+      ...patch,
+      ...(patch.status === 'published' && {
+        publishedAt: sql`coalesce(${products.publishedAt}, now())`,
+      }),
+    })
+    .where(and(eq(products.id, id), isNull(products.deletedAt)))
+    .returning();
+  if (!updated) throw new ApiError(404, 'Product not found');
 
-  try {
-    const result = await db
-      .update(products)
-      .set({
-        name: name || undefined,
-        description: description || undefined,
-        status: status || undefined,
-        featured: featured !== undefined ? featured : undefined,
-        metaTitle: metaTitle || undefined,
-        metaDescription: metaDescription || undefined,
-      })
-      .where(eq(products.id, id))
-      .returning();
-
-    if (!result.length) {
-      return c.json({ error: 'Product not found' }, 404);
-    }
-
-    return c.json({ data: result[0] });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  return c.json({ data: updated });
 });
 
 /**
  * DELETE /admin/products/:id
- * Soft delete product
+ * Soft delete; order history keeps referencing it.
  */
 app.delete('/products/:id', async (c) => {
-  const id = c.req.param('id');
+  const id = idParam(c, 'id');
+  const [deleted] = await db
+    .update(products)
+    .set({ deletedAt: new Date(), status: 'archived' })
+    .where(and(eq(products.id, id), isNull(products.deletedAt)))
+    .returning();
+  if (!deleted) throw new ApiError(404, 'Product not found');
+  return c.json({ message: 'Product deleted', data: deleted });
+});
 
-  try {
-    const result = await db
-      .update(products)
-      .set({ deletedAt: new Date() })
-      .where(eq(products.id, id))
-      .returning();
+/**
+ * PUT /admin/products/:id/categories
+ * Body: { categoryIds: [...] } — replaces the product's categories.
+ */
+app.put('/products/:id/categories', async (c) => {
+  const id = idParam(c, 'id');
+  const { categoryIds } = await parseBody(c, setProductCategoriesSchema);
 
-    if (!result.length) {
-      return c.json({ error: 'Product not found' }, 404);
+  const [product] = await db.select({ id: products.id }).from(products).where(eq(products.id, id)).limit(1);
+  if (!product) throw new ApiError(404, 'Product not found');
+
+  await db.transaction(async (tx) => {
+    await tx.delete(productCategories).where(eq(productCategories.productId, id));
+    if (categoryIds.length) {
+      await tx
+        .insert(productCategories)
+        .values([...new Set(categoryIds)].map((categoryId) => ({ productId: id, categoryId })));
     }
+  });
 
-    return c.json({ message: 'Product deleted', data: result[0] });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  const data = await db
+    .select({ id: categories.id, slug: categories.slug, name: categories.name })
+    .from(productCategories)
+    .innerJoin(categories, eq(productCategories.categoryId, categories.id))
+    .where(eq(productCategories.productId, id));
+  return c.json({ data });
+});
+
+/* ========================================
+   PRODUCT IMAGES
+   ======================================== */
+
+/**
+ * POST /admin/products/:id/images
+ * Body: { storageKey | url, alt?, position?, colour? }
+ * Registers an already-uploaded image (R2 key or absolute URL).
+ */
+app.post('/products/:id/images', async (c) => {
+  const productId = idParam(c, 'id');
+  const input = await parseBody(c, addProductImageSchema);
+
+  const [product] = await db
+    .select({ id: products.id })
+    .from(products)
+    .where(and(eq(products.id, productId), isNull(products.deletedAt)))
+    .limit(1);
+  if (!product) throw new ApiError(404, 'Product not found');
+
+  const [image] = await db
+    .insert(productImages)
+    .values({
+      productId,
+      storageKey: (input.storageKey ?? input.url)!,
+      alt: input.alt ?? null,
+      colour: input.colour ?? null,
+      position:
+        input.position ??
+        sql`(select coalesce(max(${productImages.position}) + 1, 0) from ${productImages} where ${productImages.productId} = ${productId})`,
+    })
+    .returning();
+
+  return c.json({ data: { ...image, url: imageUrl(image.storageKey) } }, 201);
+});
+
+/**
+ * DELETE /admin/images/:imageId
+ */
+app.delete('/images/:imageId', async (c) => {
+  const imageId = idParam(c, 'imageId');
+  const [deleted] = await db.delete(productImages).where(eq(productImages.id, imageId)).returning();
+  if (!deleted) throw new ApiError(404, 'Image not found');
+  return c.json({ message: 'Image deleted', data: deleted });
 });
 
 /* ========================================
@@ -188,136 +285,72 @@ app.delete('/products/:id', async (c) => {
 
 /**
  * POST /admin/products/:productId/variants
- * Create variant for a product
+ * Creates the variant and its inventory row (optionally with starting stock).
  */
 app.post('/products/:productId/variants', async (c) => {
-  const productId = c.req.param('productId');
-  const body = await c.req.json();
+  const productId = idParam(c, 'productId');
+  const { initialQuantity = 0, ...input } = await parseBody(c, createVariantSchema);
+  const admin = getAuth(c).user;
 
-  const { sku, size, colour, priceKobo, compareAtPriceKobo, weightGrams } =
-    body;
+  const [product] = await db
+    .select({ id: products.id })
+    .from(products)
+    .where(and(eq(products.id, productId), isNull(products.deletedAt)))
+    .limit(1);
+  if (!product) throw new ApiError(404, 'Product not found');
 
-  if (!sku || priceKobo === undefined) {
-    return c.json(
-      { error: 'sku and priceKobo are required' },
-      400
-    );
-  }
-
-  if (priceKobo < 0) {
-    return c.json({ error: 'priceKobo must be >= 0' }, 400);
-  }
-
-  try {
-    // Verify product exists
-    const product = await db
-      .select()
-      .from(products)
-      .where(eq(products.id, productId))
-      .limit(1);
-
-    if (!product.length) {
-      return c.json({ error: 'Product not found' }, 404);
-    }
-
-    const variant = await db
+  const variant = await db.transaction(async (tx) => {
+    const [created] = await tx
       .insert(productVariants)
-      .values({
-        productId,
-        sku,
-        size: size || null,
-        colour: colour || null,
-        priceKobo,
-        compareAtPriceKobo: compareAtPriceKobo || null,
-        weightGrams: weightGrams || null,
-      })
+      .values({ productId, ...input })
       .returning();
-
-    // Auto-create inventory record with quantity 0
-    await db.insert(inventory).values({
-      variantId: variant[0].id,
-      quantity: 0,
-    });
-
-    return c.json({ data: variant[0] }, 201);
-  } catch (err: any) {
-    if (err.message.includes('duplicate')) {
-      return c.json({ error: 'sku must be unique' }, 400);
+    await tx.insert(inventory).values({ variantId: created.id, quantity: initialQuantity });
+    if (initialQuantity > 0) {
+      await tx.insert(inventoryMovements).values({
+        variantId: created.id,
+        delta: initialQuantity,
+        reason: 'restock',
+        referenceId: admin.id,
+        note: 'initial stock',
+      });
     }
-    return c.json({ error: err.message }, 500);
-  }
+    return created;
+  });
+
+  return c.json({ data: { ...variant, inventory: { quantity: initialQuantity } } }, 201);
 });
 
 /**
  * PATCH /admin/variants/:variantId
- * Update variant
  */
 app.patch('/variants/:variantId', async (c) => {
-  const variantId = c.req.param('variantId');
-  const body = await c.req.json();
+  const variantId = idParam(c, 'variantId');
+  const patch = definedOnly(await parseBody(c, updateVariantSchema));
+  assertNonEmpty(patch);
 
-  const {
-    sku,
-    size,
-    colour,
-    priceKobo,
-    compareAtPriceKobo,
-    weightGrams,
-    active,
-  } = body;
+  const [updated] = await db
+    .update(productVariants)
+    .set(patch)
+    .where(and(eq(productVariants.id, variantId), isNull(productVariants.deletedAt)))
+    .returning();
+  if (!updated) throw new ApiError(404, 'Variant not found');
 
-  if (priceKobo !== undefined && priceKobo < 0) {
-    return c.json({ error: 'priceKobo must be >= 0' }, 400);
-  }
-
-  try {
-    const result = await db
-      .update(productVariants)
-      .set({
-        sku: sku || undefined,
-        size: size !== undefined ? size : undefined,
-        colour: colour !== undefined ? colour : undefined,
-        priceKobo: priceKobo || undefined,
-        compareAtPriceKobo:
-          compareAtPriceKobo !== undefined ? compareAtPriceKobo : undefined,
-        weightGrams: weightGrams !== undefined ? weightGrams : undefined,
-        active: active !== undefined ? active : undefined,
-      })
-      .where(eq(productVariants.id, variantId))
-      .returning();
-
-    if (!result.length) {
-      return c.json({ error: 'Variant not found' }, 404);
-    }
-
-    return c.json({ data: result[0] });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  return c.json({ data: updated });
 });
 
 /**
  * DELETE /admin/variants/:variantId
- * Soft delete variant
+ * Soft delete and deactivate; order history keeps referencing it.
  */
 app.delete('/variants/:variantId', async (c) => {
-  const variantId = c.req.param('variantId');
-
-  try {
-    const result = await db
-      .update(productVariants)
-      .set({ deletedAt: new Date() })
-      .where(eq(productVariants.id, variantId))
-      .returning();
-
-    if (!result.length) {
-      return c.json({ error: 'Variant not found' }, 404);
-    }
-
-    return c.json({ message: 'Variant deleted', data: result[0] });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  const variantId = idParam(c, 'variantId');
+  const [deleted] = await db
+    .update(productVariants)
+    .set({ deletedAt: new Date(), active: false })
+    .where(and(eq(productVariants.id, variantId), isNull(productVariants.deletedAt)))
+    .returning();
+  if (!deleted) throw new ApiError(404, 'Variant not found');
+  return c.json({ message: 'Variant deleted', data: deleted });
 });
 
 /* ========================================
@@ -325,106 +358,92 @@ app.delete('/variants/:variantId', async (c) => {
    ======================================== */
 
 /**
+ * GET /admin/inventory/low-stock
+ */
+app.get('/inventory/low-stock', async (c) => {
+  const data = await db
+    .select({
+      variantId: productVariants.id,
+      sku: productVariants.sku,
+      size: productVariants.size,
+      colour: productVariants.colour,
+      productId: products.id,
+      productName: products.name,
+      quantity: inventory.quantity,
+      lowStockThreshold: inventory.lowStockThreshold,
+    })
+    .from(inventory)
+    .innerJoin(productVariants, eq(inventory.variantId, productVariants.id))
+    .innerJoin(products, eq(productVariants.productId, products.id))
+    .where(
+      and(
+        sql`${inventory.quantity} <= ${inventory.lowStockThreshold}`,
+        isNull(productVariants.deletedAt),
+        isNull(products.deletedAt),
+      ),
+    )
+    .orderBy(asc(inventory.quantity));
+
+  return c.json({ data });
+});
+
+/**
  * PATCH /admin/inventory/:variantId
- * Update stock quantity
+ * Body: { quantity?, reason?, note?, lowStockThreshold?, allowBackorder? }
+ * `quantity` is the new absolute on-hand count; the difference is logged.
  */
 app.patch('/inventory/:variantId', async (c) => {
-  const variantId = c.req.param('variantId');
-  const body = await c.req.json();
+  const variantId = idParam(c, 'variantId');
+  const { quantity, reason, note, lowStockThreshold, allowBackorder } = await parseBody(
+    c,
+    updateInventorySchema,
+  );
+  const admin = getAuth(c).user;
 
-  const { quantity, reason = 'adjustment', note } = body;
-
-  if (quantity === undefined || !Number.isInteger(quantity)) {
-    return c.json({ error: 'quantity must be an integer' }, 400);
-  }
-
-  try {
-    // Get current inventory
-    const current = await db
+  const data = await db.transaction(async (tx) => {
+    const [current] = await tx
       .select()
       .from(inventory)
       .where(eq(inventory.variantId, variantId))
-      .limit(1);
+      .limit(1)
+      .for('update');
+    if (!current) throw new ApiError(404, 'Inventory not found for this variant');
 
-    if (!current.length) {
-      return c.json({ error: 'Inventory not found' }, 404);
-    }
-
-    const oldQty = current[0].quantity;
-    const delta = quantity - oldQty;
-
-    // Update inventory
-    const result = await db
+    const [updated] = await tx
       .update(inventory)
-      .set({ quantity })
+      .set(definedOnly({ quantity, lowStockThreshold, allowBackorder }))
       .where(eq(inventory.variantId, variantId))
       .returning();
 
-    // Record movement
+    const delta = quantity === undefined ? 0 : quantity - current.quantity;
     if (delta !== 0) {
-      await db.insert(inventoryMovements).values({
+      await tx.insert(inventoryMovements).values({
         variantId,
         delta,
         reason,
-        note: note || null,
-        referenceId: null,
+        referenceId: admin.id,
+        note: note ?? null,
       });
     }
+    return updated;
+  });
 
-    return c.json({ data: result[0] });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  return c.json({ data });
 });
 
 /**
  * GET /admin/inventory/:variantId/movements
- * View stock movement history
+ * Newest first, last 200.
  */
 app.get('/inventory/:variantId/movements', async (c) => {
-  const variantId = c.req.param('variantId');
-
-  try {
-    const movements = await db
-      .select()
-      .from(inventoryMovements)
-      .where(eq(inventoryMovements.variantId, variantId))
-      .orderBy(inventoryMovements.createdAt);
-
-    return c.json({ data: movements });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
-});
-
-/**
- * GET /admin/inventory/low-stock
- * List variants below low stock threshold
- */
-app.get('/inventory/low-stock', async (c) => {
-  try {
-    const lowStock = await db.execute(sql`
-      SELECT
-        pv.id,
-        pv.sku,
-        pv.size,
-        pv.colour,
-        p.name as product_name,
-        i.quantity,
-        i.low_stock_threshold
-      FROM inventory i
-      JOIN product_variants pv ON i.variant_id = pv.id
-      JOIN products p ON pv.product_id = p.id
-      WHERE i.quantity <= i.low_stock_threshold
-        AND pv.deleted_at IS NULL
-        AND p.deleted_at IS NULL
-      ORDER BY i.quantity ASC
-    `);
-
-    return c.json({ data: lowStock.rows });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  const variantId = idParam(c, 'variantId');
+  const data = await db
+    .select()
+    .from(inventoryMovements)
+    .where(eq(inventoryMovements.variantId, variantId))
+    .orderBy(desc(inventoryMovements.createdAt))
+    .limit(200);
+  return c.json({ data });
 });
 
 /* ========================================
@@ -433,113 +452,193 @@ app.get('/inventory/low-stock', async (c) => {
 
 /**
  * POST /admin/categories
- * Create category
  */
 app.post('/categories', async (c) => {
-  const body = await c.req.json();
-
-  const { slug, name, description, parentId, position } = body;
-
-  if (!slug || !name) {
-    return c.json(
-      { error: 'slug and name are required' },
-      400
-    );
-  }
-
-  try {
-    const result = await db
-      .insert(categories)
-      .values({
-        slug,
-        name,
-        description: description || null,
-        parentId: parentId || null,
-        position: position || 0,
-      })
-      .returning();
-
-    return c.json({ data: result[0] }, 201);
-  } catch (err: any) {
-    if (err.message.includes('duplicate')) {
-      return c.json({ error: 'slug must be unique' }, 400);
-    }
-    return c.json({ error: err.message }, 500);
-  }
+  const input = await parseBody(c, createCategorySchema);
+  const [category] = await db.insert(categories).values(input).returning();
+  return c.json({ data: category }, 201);
 });
 
 /**
  * GET /admin/categories
- * List all categories
  */
 app.get('/categories', async (c) => {
-  try {
-    const allCategories = await db
-      .select()
-      .from(categories)
-      .where(isNull(categories.deletedAt))
-      .orderBy(categories.position);
-
-    return c.json({ data: allCategories });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  const data = await db
+    .select({
+      category: categories,
+      productCount: sql<number>`count(${productCategories.productId})`.mapWith(Number),
+    })
+    .from(categories)
+    .leftJoin(productCategories, eq(productCategories.categoryId, categories.id))
+    .where(isNull(categories.deletedAt))
+    .groupBy(categories.id)
+    .orderBy(asc(categories.position), asc(categories.name));
+  return c.json({ data: data.map((r) => ({ ...r.category, productCount: r.productCount })) });
 });
 
 /**
  * PATCH /admin/categories/:id
- * Update category
  */
 app.patch('/categories/:id', async (c) => {
-  const id = c.req.param('id');
-  const body = await c.req.json();
+  const id = idParam(c, 'id');
+  const patch = definedOnly(await parseBody(c, updateCategorySchema));
+  assertNonEmpty(patch);
+  if (patch.parentId === id) throw new ApiError(400, 'A category cannot be its own parent');
 
-  const { name, description, parentId, position } = body;
-
-  try {
-    const result = await db
-      .update(categories)
-      .set({
-        name: name || undefined,
-        description: description || undefined,
-        parentId: parentId !== undefined ? parentId : undefined,
-        position: position !== undefined ? position : undefined,
-      })
-      .where(eq(categories.id, id))
-      .returning();
-
-    if (!result.length) {
-      return c.json({ error: 'Category not found' }, 404);
-    }
-
-    return c.json({ data: result[0] });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  const [updated] = await db
+    .update(categories)
+    .set(patch)
+    .where(and(eq(categories.id, id), isNull(categories.deletedAt)))
+    .returning();
+  if (!updated) throw new ApiError(404, 'Category not found');
+  return c.json({ data: updated });
 });
 
 /**
  * DELETE /admin/categories/:id
- * Soft delete category
+ * Soft delete. Products stay, but drop out of this category's listing.
  */
 app.delete('/categories/:id', async (c) => {
-  const id = c.req.param('id');
+  const id = idParam(c, 'id');
+  const [deleted] = await db
+    .update(categories)
+    .set({ deletedAt: new Date() })
+    .where(and(eq(categories.id, id), isNull(categories.deletedAt)))
+    .returning();
+  if (!deleted) throw new ApiError(404, 'Category not found');
+  return c.json({ message: 'Category deleted', data: deleted });
+});
 
-  try {
-    const result = await db
-      .update(categories)
-      .set({ deletedAt: new Date() })
-      .where(eq(categories.id, id))
-      .returning();
+/* ========================================
+   ORDERS
+   ======================================== */
 
-    if (!result.length) {
-      return c.json({ error: 'Category not found' }, 404);
-    }
+/**
+ * GET /admin/orders?status=paid&page=1&limit=20
+ */
+app.get('/orders', async (c) => {
+  const { status, page, limit } = parseQuery(c, adminOrderListSchema);
+  const where = status ? eq(orders.status, status) : undefined;
 
-    return c.json({ message: 'Category deleted', data: result[0] });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  const [rows, [{ total }]] = await Promise.all([
+    db
+      .select()
+      .from(orders)
+      .where(where)
+      .orderBy(desc(orders.createdAt))
+      .limit(limit)
+      .offset((page - 1) * limit),
+    db.select({ total: sql<number>`count(*)`.mapWith(Number) }).from(orders).where(where),
+  ]);
+
+  return c.json({ data: rows, pagination: { page, limit, total } });
+});
+
+/**
+ * GET /admin/orders/:id
+ */
+app.get('/orders/:id', async (c) => {
+  const order = await getOrderWithItems(idParam(c, 'id'));
+  if (!order) throw new ApiError(404, 'Order not found');
+  return c.json({ data: order });
+});
+
+/**
+ * PATCH /admin/orders/:id/status
+ * Body: { status, trackingNumber?, adminNotes? }
+ * pending→paid decrements stock; cancelling releases holds or restocks.
+ */
+app.patch('/orders/:id/status', async (c) => {
+  const id = idParam(c, 'id');
+  const { status, trackingNumber, adminNotes } = await parseBody(c, updateOrderStatusSchema);
+  const admin = getAuth(c).user;
+  const data = await transitionOrder(id, status, { trackingNumber, adminNotes, actorId: admin.id });
+  return c.json({ data });
+});
+
+/* ========================================
+   CUSTOMERS
+   ======================================== */
+
+const customerStats = {
+  orderCount: sql<number>`count(${orders.id})`.mapWith(Number),
+  totalSpentKobo: sql<number>`coalesce(sum(${orders.totalKobo}) filter (where ${inArray(
+    orders.status,
+    [...REVENUE_STATUSES],
+  )}), 0)`.mapWith(Number),
+  lastOrderAt: sql<Date | null>`max(${orders.createdAt})`,
+};
+
+const customerFields = {
+  id: users.id,
+  email: users.email,
+  firstName: users.firstName,
+  lastName: users.lastName,
+  phone: users.phone,
+  role: users.role,
+  emailVerified: users.emailVerified,
+  createdAt: users.createdAt,
+};
+
+/**
+ * GET /admin/customers?search=ada&page=1&limit=20
+ */
+app.get('/customers', async (c) => {
+  const { page, limit, search } = parseQuery(
+    c,
+    paginationSchema.extend({ search: z.string().trim().min(1).optional() }),
+  );
+  const pattern = search ? `%${search.replace(/[%_\\]/g, '\\$&')}%` : undefined;
+  const where = and(
+    eq(users.role, 'customer'),
+    pattern
+      ? or(
+          ilike(users.email, pattern),
+          ilike(users.firstName, pattern),
+          ilike(users.lastName, pattern),
+          ilike(users.phone, pattern),
+        )
+      : undefined,
+  );
+
+  const [rows, [{ total }]] = await Promise.all([
+    db
+      .select({ ...customerFields, ...customerStats })
+      .from(users)
+      .leftJoin(orders, eq(orders.userId, users.id))
+      .where(where)
+      .groupBy(users.id)
+      .orderBy(desc(users.createdAt))
+      .limit(limit)
+      .offset((page - 1) * limit),
+    db.select({ total: sql<number>`count(*)`.mapWith(Number) }).from(users).where(where),
+  ]);
+
+  return c.json({ data: rows, pagination: { page, limit, total } });
+});
+
+/**
+ * GET /admin/customers/:id
+ * Customer profile with their orders.
+ */
+app.get('/customers/:id', async (c) => {
+  const id = idParam(c, 'id');
+  const [customer] = await db
+    .select({ ...customerFields, ...customerStats })
+    .from(users)
+    .leftJoin(orders, eq(orders.userId, users.id))
+    .where(eq(users.id, id))
+    .groupBy(users.id)
+    .limit(1);
+  if (!customer) throw new ApiError(404, 'Customer not found');
+
+  const customerOrders = await db
+    .select()
+    .from(orders)
+    .where(eq(orders.userId, id))
+    .orderBy(desc(orders.createdAt));
+
+  return c.json({ data: { ...customer, orders: customerOrders } });
 });
 
 /* ========================================
@@ -548,22 +647,43 @@ app.delete('/categories/:id', async (c) => {
 
 /**
  * GET /admin/stats
- * Quick dashboard stats
  */
 app.get('/stats', async (c) => {
-  try {
-    const stats = await db.execute(sql`
-      SELECT
-        (SELECT COUNT(*) FROM products WHERE deleted_at IS NULL)::int as total_products,
-        (SELECT COUNT(*) FROM product_variants WHERE deleted_at IS NULL)::int as total_variants,
-        (SELECT SUM(quantity) FROM inventory)::int as total_stock,
-        (SELECT COUNT(*) FROM inventory WHERE quantity <= low_stock_threshold)::int as low_stock_count
-    `);
+  const revenue = sql.join(
+    REVENUE_STATUSES.map((s) => sql`${s}`),
+    sql`, `,
+  );
+  const result = await db.execute<Record<string, number>>(sql`
+    SELECT
+      (SELECT count(*) FROM products WHERE deleted_at IS NULL)::int AS total_products,
+      (SELECT count(*) FROM product_variants WHERE deleted_at IS NULL)::int AS total_variants,
+      (SELECT coalesce(sum(i.quantity), 0) FROM inventory i
+         JOIN product_variants pv ON pv.id = i.variant_id
+        WHERE pv.deleted_at IS NULL)::int AS total_stock,
+      (SELECT count(*) FROM inventory i
+         JOIN product_variants pv ON pv.id = i.variant_id
+        WHERE pv.deleted_at IS NULL AND i.quantity <= i.low_stock_threshold)::int AS low_stock_count,
+      (SELECT count(*) FROM orders)::int AS total_orders,
+      (SELECT count(*) FROM orders WHERE status = 'pending')::int AS pending_orders,
+      (SELECT count(*) FROM orders WHERE status IN ('paid', 'processing'))::int AS orders_to_fulfil,
+      (SELECT coalesce(sum(total_kobo), 0) FROM orders WHERE status IN (${revenue}))::bigint AS revenue_kobo,
+      (SELECT count(*) FROM users WHERE role = 'customer')::int AS total_customers
+  `);
 
-    return c.json({ data: stats.rows[0] });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+  const row = result.rows[0];
+  return c.json({
+    data: {
+      totalProducts: row.total_products,
+      totalVariants: row.total_variants,
+      totalStock: row.total_stock,
+      lowStockCount: row.low_stock_count,
+      totalOrders: row.total_orders,
+      pendingOrders: row.pending_orders,
+      ordersToFulfil: row.orders_to_fulfil,
+      revenueKobo: Number(row.revenue_kobo),
+      totalCustomers: row.total_customers,
+    },
+  });
 });
 
 export default app;

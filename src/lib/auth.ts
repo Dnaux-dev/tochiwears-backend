@@ -41,15 +41,3 @@ export function generateEmailVerificationToken(): { token: string; expiresAt: Da
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
   return { token, expiresAt };
 }
-
-export function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-
-export function normalizePhoneNumber(phone: string): string {
-  let cleaned = phone.replace(/[^\d+]/g, '');
-  if (cleaned.startsWith('0')) {
-    cleaned = '+234' + cleaned.slice(1);
-  }
-  return cleaned;
-}

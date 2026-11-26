@@ -2083,6 +2083,14 @@
     }
   },
   "enums": {
+    "public.coupon_type": {
+      "name": "coupon_type",
+      "schema": "public",
+      "values": [
+        "percentage",
+        "fixed_amount"
+      ]
+    },
     "public.order_status": {
       "name": "order_status",
       "schema": "public",

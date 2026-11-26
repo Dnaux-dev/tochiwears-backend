@@ -1,3 +1,8 @@
+DO $$ BEGIN
+ CREATE TYPE "public"."coupon_type" AS ENUM('percentage', 'fixed_amount');
+EXCEPTION
+ WHEN duplicate_object THEN null;
+END $$;--> statement-breakpoint
 CREATE TYPE "public"."order_status" AS ENUM('pending', 'paid', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded');--> statement-breakpoint
 CREATE TYPE "public"."user_role" AS ENUM('customer', 'admin', 'super_admin');--> statement-breakpoint
 CREATE TABLE "cart_items" (

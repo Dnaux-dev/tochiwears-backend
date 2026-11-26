@@ -1,11 +1,12 @@
 
 
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import { categories } from './categories';
 import { uuidv7 } from 'uuidv7';
 import {
     bigint,
     boolean,
+    check,
     index,
     integer,
     pgEnum,
@@ -86,10 +87,14 @@ export const productCategories = pgTable(
         productId: uuid('product_id')
             .notNull()
             .references(() => products.id, { onDelete: 'cascade' }),
-        categoryId: uuid('category_id').notNull(),
-        // Note: categoryId references categories.id but we import categories separately to avoid circular deps
+        categoryId: uuid('category_id')
+            .notNull()
+            .references(() => categories.id, { onDelete: 'cascade' }),
     },
-    (t) => [primaryKey({ columns: [t.productId, t.categoryId] })],
+    (t) => [
+        primaryKey({ columns: [t.productId, t.categoryId] }),
+        index('product_categories_category_idx').on(t.categoryId),
+    ],
 );
 
 /* ------------------------------------------------------------------ */
@@ -155,6 +160,7 @@ export const productVariants = pgTable(
         uniqueIndex('variants_sku_idx').on(t.sku),
         uniqueIndex('variants_option_idx').on(t.productId, t.size, t.colour),
         index('variants_product_idx').on(t.productId, t.position),
+        check('variant_price_non_negative', sql`${t.priceKobo} >= 0`),
     ],
 );
 

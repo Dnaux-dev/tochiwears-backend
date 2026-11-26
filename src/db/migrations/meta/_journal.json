@@ -15,6 +15,13 @@
       "when": 1786171852604,
       "tag": "0001_futuristic_falcon",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795701019213,
+      "tag": "0002_constraints_and_coupon_tracking",
+      "breakpoints": true
     }
   ]
 }

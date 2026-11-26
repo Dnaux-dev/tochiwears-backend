@@ -44,7 +44,7 @@ export const users = pgTable(
   {
     id: id(),
     email: text('email').notNull().unique(),
-    /** Hashed with bcrypt, never store plaintext */
+    /** scrypt `salt:hash` (see lib/auth.ts), never plaintext */
     passwordHash: text('password_hash'),
     firstName: text('first_name'),
     lastName: text('last_name'),

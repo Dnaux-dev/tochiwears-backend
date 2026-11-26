@@ -1,16 +1,17 @@
 {
   "name": "tochiwears-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Tochiwears e-commerce REST API (Hono + Drizzle + Postgres)",
+  "main": "src/index.ts",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "build": "tsc",
+    "build": "echo \"No build step: the server runs TypeScript directly with tsx\"",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
-    "db:seed": "tsx src/db/seed.ts",
-    "deploy": "docker build -t tochiwears ."
+    "db:seed": "tsx src/db/seed.ts"
   },
   "keywords": [],
   "author": "",

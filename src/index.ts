@@ -1,27 +1,43 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { serve } from '@hono/node-server';
 import { cors } from 'hono/cors';
-import productsApi from './api/products';
+import { logger } from 'hono/logger';
+import productsApi, { categoriesApi } from './api/products';
 import cartApi from './api/cart';
 import ordersApi from './api/orders';
 import adminApi from './api/admin';
 import authApi from './api/auth';
 import { requireAuth, requireAdmin } from './lib/middleware';
+import { handleError } from './lib/http';
+import { openApiSpec } from './lib/openapi';
+import { startHousekeeping } from './jobs/reservation-expiry';
 
 const app = new Hono();
 
-// Enable CORS for frontend requests
+/**
+ * CORS: only origins listed in CORS_ORIGINS (comma-separated) get CORS headers.
+ * Required because credentials are allowed — a wildcard would let any site
+ * make authenticated requests if cookie sessions are ever used.
+ */
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000')
+  .split(',')
+  .map((o) => o.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+
 app.use(
   '*',
   cors({
-    origin: (origin) => origin || '*',
+    origin: (origin) => (allowedOrigins.includes(origin) ? origin : null),
     allowHeaders: ['Content-Type', 'Authorization'],
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true,
-  })
+    maxAge: 86400,
+  }),
 );
+app.use('*', logger());
 
-import { openApiSpec } from './lib/openapi';
+app.onError(handleError);
+app.notFound((c) => c.json({ error: `Route not found: ${c.req.method} ${c.req.path}` }, 404));
 
 // Health check
 app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }));
@@ -30,7 +46,7 @@ app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOStri
 app.get('/openapi.json', (c) => c.json(openApiSpec));
 
 // Interactive Swagger UI Documentation on / and /docs
-const docsHandler = (c: any) => {
+const docsHandler = (c: Context) => {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -86,84 +102,40 @@ app.get('/docs', docsHandler);
    PUBLIC API
    ======================================== */
 
-// Products (public, no auth needed)
 app.route('/api/products', productsApi);
+app.route('/api/categories', categoriesApi);
 
 /* ========================================
    AUTH ROUTES
    ======================================== */
 
-// Authentication (signup, login, password reset, etc.)
 app.route('/auth', authApi);
 
 /* ========================================
    CUSTOMER ROUTES (PROTECTED)
    ======================================== */
 
-// Cart (requires authentication)
-app.use('/cart*', requireAuth);
+app.use('/cart', requireAuth);
+app.use('/cart/*', requireAuth);
 app.route('/cart', cartApi);
 
-// Orders (requires authentication)
-app.use('/orders*', requireAuth);
+app.use('/orders', requireAuth);
+app.use('/orders/*', requireAuth);
 app.route('/orders', ordersApi);
 
 /* ========================================
    ADMIN API (PROTECTED + ADMIN ROLE)
    ======================================== */
 
-// Protect all admin routes with requireAdmin middleware
-app.use('/admin*', requireAdmin);
+app.use('/admin', requireAdmin);
+app.use('/admin/*', requireAdmin);
 app.route('/admin', adminApi);
 
 const port = Number(process.env.PORT) || 3000;
-console.log(`🚀 Server running on port ${port}`);
-console.log(`
-📚 Routes:
 
-PUBLIC API (no auth):
-  GET    /api/products
-  GET    /api/products/:slug
-
-AUTH (public):
-  POST   /auth/signup
-  POST   /auth/login
-  POST   /auth/logout
-  POST   /auth/verify-email
-  POST   /auth/request-password-reset
-  POST   /auth/reset-password
-  GET    /auth/me (requires token)
-
-CUSTOMER (requires token):
-  GET    /cart
-  POST   /cart
-  PATCH  /cart/:itemId
-  DELETE /cart/:itemId
-  DELETE /cart
-
-  GET    /orders
-  POST   /orders
-  GET    /orders/:orderId
-
-ADMIN (requires token + admin role):
-  POST   /admin/products
-  GET    /admin/products
-  PATCH  /admin/products/:id
-  DELETE /admin/products/:id
-  POST   /admin/products/:productId/variants
-  PATCH  /admin/variants/:variantId
-  DELETE /admin/variants/:variantId
-  PATCH  /admin/inventory/:variantId
-  GET    /admin/inventory/:variantId/movements
-  GET    /admin/inventory/low-stock
-  POST   /admin/categories
-  GET    /admin/categories
-  PATCH  /admin/categories/:id
-  DELETE /admin/categories/:id
-  GET    /admin/stats
-`);
-
-serve({
-  fetch: app.fetch,
-  port,
+serve({ fetch: app.fetch, port }, () => {
+  console.log(`🚀 Server running on port ${port} — docs at /docs`);
+  console.log(`🌐 CORS origins: ${allowedOrigins.join(', ')}`);
 });
+
+startHousekeeping();

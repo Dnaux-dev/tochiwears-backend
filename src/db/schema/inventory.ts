@@ -7,6 +7,7 @@ import { relations, sql } from 'drizzle-orm';
 import { uuidv7 } from 'uuidv7';
 import {
   boolean,
+  check,
   index,
   integer,
   pgEnum,
@@ -72,7 +73,10 @@ export const inventory = pgTable(
       .defaultNow()
       .$onUpdate(() => new Date()),
   },
-  (t) => [index('inventory_low_stock_idx').on(t.quantity)],
+  (t) => [
+    index('inventory_low_stock_idx').on(t.quantity),
+    check('inventory_quantity_non_negative', sql`${t.quantity} >= 0`),
+  ],
 );
 
 /* ------------------------------------------------------------------ */
@@ -130,7 +134,7 @@ export const stockReservations = pgTable(
       .notNull()
       .references(() => productVariants.id, { onDelete: 'cascade' }),
 
-    /** FK to your orders table once that exists. */
+    /** The order this hold belongs to (not an FK, to avoid a circular import). */
     orderId: uuid('order_id').notNull(),
 
     quantity: integer('quantity').notNull(),
@@ -142,6 +146,7 @@ export const stockReservations = pgTable(
   (t) => [
     index('reservations_variant_idx').on(t.variantId, t.expiresAt),
     index('reservations_order_idx').on(t.orderId),
+    check('reservation_quantity_positive', sql`${t.quantity} > 0`),
   ],
 );
 
@@ -177,25 +182,6 @@ export const stockReservationsRelations = relations(
     }),
   }),
 );
-
-/* ------------------------------------------------------------------ */
-/* Post-migration SQL constraints                                      */
-/* ------------------------------------------------------------------ */
-
-export const POST_MIGRATION_SQL = sql`
-  -- Stock can never go negative at the database level
-  ALTER TABLE inventory
-    ADD CONSTRAINT inventory_quantity_non_negative
-    CHECK (quantity >= 0);
-
-  ALTER TABLE product_variants
-    ADD CONSTRAINT variant_price_non_negative
-    CHECK (price_kobo >= 0);
-
-  ALTER TABLE stock_reservations
-    ADD CONSTRAINT reservation_quantity_positive
-    CHECK (quantity > 0);
-`;
 
 /* ------------------------------------------------------------------ */
 /* Inferred types                                                      */

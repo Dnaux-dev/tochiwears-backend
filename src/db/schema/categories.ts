@@ -6,6 +6,7 @@
 import { relations } from 'drizzle-orm';
 import { uuidv7 } from 'uuidv7';
 import {
+  type AnyPgColumn,
   index,
   integer,
   pgTable,
@@ -40,7 +41,9 @@ export const categories = pgTable(
     name: text('name').notNull(),
     description: text('description'),
     /** Self-referencing for sub-collections, e.g. Men > Shirts. */
-    parentId: uuid('parent_id'),
+    parentId: uuid('parent_id').references((): AnyPgColumn => categories.id, {
+      onDelete: 'set null',
+    }),
     position: integer('position').notNull().default(0),
     ...timestamps,
   },

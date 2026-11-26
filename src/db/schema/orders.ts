@@ -136,6 +136,7 @@ export const orders = pgTable(
     subtotalKobo: bigint('subtotal_kobo', { mode: 'number' }).notNull(), // Items total
     deliveryFeeKobo: bigint('delivery_fee_kobo', { mode: 'number' }).notNull().default(0),
     discountKobo: bigint('discount_kobo', { mode: 'number' }).notNull().default(0), // From coupon
+    couponCode: text('coupon_code'), // Coupon applied, for per-customer limits
     totalKobo: bigint('total_kobo', { mode: 'number' }).notNull(), // subtotal + delivery - discount
 
     // Status
@@ -162,6 +163,7 @@ export const orders = pgTable(
     index('orders_status_idx').on(t.status),
     index('orders_order_number_idx').on(t.orderNumber),
     index('orders_opay_order_id_idx').on(t.opayOrderId),
+    index('orders_coupon_code_idx').on(t.couponCode, t.userId),
   ],
 );
 
