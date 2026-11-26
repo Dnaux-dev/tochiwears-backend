@@ -3,8 +3,8 @@
  * Signup, login, password reset, email verification
  */
 
-import { Hono } from 'hono';
-import { and, eq, gt } from 'drizzle-orm';
+import { Hono, type Context } from 'hono';
+import { and, desc, eq, gt } from 'drizzle-orm';
 import { db } from '@/db';
 import { users, sessions, passwordResets, emailVerifications, type User } from '@/db/schema';
 import {
@@ -22,7 +22,7 @@ import {
   generateEmailVerificationToken,
 } from '@/lib/auth';
 import { requireAuth, getAuth, type AppEnv } from '@/lib/middleware';
-import { sendVerificationEmail, sendPasswordResetEmail } from '@/lib/email';
+import { sendVerificationEmail, sendPasswordResetEmail, VERIFY_REDIRECT_URL } from '@/lib/email';
 import { ApiError, parseBody } from '@/lib/http';
 
 const app = new Hono<AppEnv>();
@@ -56,6 +56,37 @@ async function sendSafely(send: () => Promise<unknown>) {
   }
 }
 
+/** Public base URL of this API, for links in emails. */
+function apiBaseUrl(c: Context): string {
+  if (process.env.API_URL) return process.env.API_URL;
+  const url = new URL(c.req.url);
+  const proto = c.req.header('x-forwarded-proto')?.split(',')[0] || url.protocol.replace(':', '');
+  const host = c.req.header('x-forwarded-host') || c.req.header('host') || url.host;
+  return `${proto}://${host}`;
+}
+
+type VerifyResult = 'success' | 'already' | 'expired' | 'invalid';
+
+async function verifyEmailToken(token: string): Promise<VerifyResult> {
+  const [verification] = await db
+    .select()
+    .from(emailVerifications)
+    .where(eq(emailVerifications.token, token))
+    .limit(1);
+  if (!verification) return 'invalid';
+  if (verification.verified) return 'already';
+  if (verification.expiresAt <= new Date()) return 'expired';
+
+  await db.transaction(async (tx) => {
+    await tx.update(users).set({ emailVerified: true }).where(eq(users.id, verification.userId));
+    await tx
+      .update(emailVerifications)
+      .set({ verified: true })
+      .where(eq(emailVerifications.id, verification.id));
+  });
+  return 'success';
+}
+
 /**
  * POST /auth/signup
  * Body: { email, password, firstName?, lastName?, name?, phone? }
@@ -84,12 +115,15 @@ app.post('/signup', async (c) => {
   });
 
   const session = await createSession(user.id);
-  const emailSent = await sendSafely(() => sendVerificationEmail(email, verification.token));
+  const emailSent = await sendSafely(() =>
+    sendVerificationEmail(email, verification.token, apiBaseUrl(c)),
+  );
 
   return c.json(
     {
       data: {
         ...publicUser(user),
+        emailSent,
         message: emailSent
           ? 'Signup successful. Check your email to verify.'
           : 'Signup successful. We could not send the verification email right now.',
@@ -186,33 +220,62 @@ app.post('/reset-password', async (c) => {
 
 /**
  * POST /auth/verify-email
- * Body: { token }
+ * Body: { token }. For frontends that handle the link themselves.
  */
 app.post('/verify-email', async (c) => {
   const { token } = await parseBody(c, emailVerificationSchema);
+  const result = await verifyEmailToken(token);
+  if (result === 'success' || result === 'already') {
+    return c.json({ message: 'Email verified successfully', alreadyVerified: result === 'already' });
+  }
+  throw new ApiError(400, 'Invalid or expired verification token', { reason: result });
+});
 
-  const [verification] = await db
-    .select()
+/**
+ * GET /auth/verify-email?token=…
+ * The link in the verification email. Verifies, then redirects to the
+ * frontend with ?verified=success|already|expired|invalid.
+ */
+app.get('/verify-email', async (c) => {
+  const token = c.req.query('token');
+  const result = token ? await verifyEmailToken(token) : 'invalid';
+  return c.redirect(`${VERIFY_REDIRECT_URL}?verified=${result}`, 302);
+});
+
+/**
+ * POST /auth/resend-verification
+ * Sends a fresh verification link to the signed-in user (max once a minute).
+ */
+app.post('/resend-verification', requireAuth, async (c) => {
+  const { user } = getAuth(c);
+  if (user.emailVerified) throw new ApiError(400, 'Email is already verified');
+
+  const [latest] = await db
+    .select({ createdAt: emailVerifications.createdAt })
     .from(emailVerifications)
-    .where(
-      and(
-        eq(emailVerifications.token, token),
-        eq(emailVerifications.verified, false),
-        gt(emailVerifications.expiresAt, new Date()),
-      ),
-    )
+    .where(eq(emailVerifications.userId, user.id))
+    .orderBy(desc(emailVerifications.createdAt))
     .limit(1);
-  if (!verification) throw new ApiError(400, 'Invalid or expired verification token');
+  if (latest && Date.now() - latest.createdAt.getTime() < 60_000) {
+    throw new ApiError(429, 'Please wait a minute before requesting another email');
+  }
 
+  const verification = generateEmailVerificationToken();
   await db.transaction(async (tx) => {
-    await tx.update(users).set({ emailVerified: true }).where(eq(users.id, verification.userId));
+    // Old unused links stop working once a new one is issued.
     await tx
-      .update(emailVerifications)
-      .set({ verified: true })
-      .where(eq(emailVerifications.id, verification.id));
+      .delete(emailVerifications)
+      .where(and(eq(emailVerifications.userId, user.id), eq(emailVerifications.verified, false)));
+    await tx.insert(emailVerifications).values({
+      userId: user.id,
+      token: verification.token,
+      expiresAt: verification.expiresAt,
+    });
   });
 
-  return c.json({ message: 'Email verified successfully' });
+  const sent = await sendSafely(() => sendVerificationEmail(user.email, verification.token, apiBaseUrl(c)));
+  if (!sent) throw new ApiError(502, 'Could not send the verification email. Please try again later.');
+  return c.json({ message: 'Verification email sent' });
 });
 
 export default app;

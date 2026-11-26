@@ -1,84 +1,87 @@
 import { Resend } from 'resend';
 
-// Use a mock client if no API key is provided, so it doesn't crash in dev
+/**
+ * Email via Resend. Without RESEND_API_KEY, emails are logged instead of sent.
+ *
+ * EMAIL_FROM_ADDRESS must use a domain verified in Resend (not gmail.com etc).
+ * Either "noreply@yourdomain.com" or "Tochiwears <noreply@yourdomain.com>".
+ */
 const apiKey = process.env.RESEND_API_KEY;
 const resend = apiKey ? new Resend(apiKey) : null;
 
-const FROM_EMAIL = process.env.EMAIL_FROM_ADDRESS || 'noreply@tochiwears.com';
-const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:3000';
+const trimSlash = (url: string) => url.replace(/\/+$/, '');
 
-/**
- * Helper function to send email via Resend
- */
-export async function sendEmail(
-  to: string,
-  subject: string,
-  html: string
-) {
+const RAW_FROM = process.env.EMAIL_FROM_ADDRESS || 'noreply@tochiwears.com';
+const FROM = RAW_FROM.includes('<') ? RAW_FROM : `Tochiwears <${RAW_FROM}>`;
+const CLIENT_URL = trimSlash(process.env.CLIENT_URL || 'http://localhost:3000');
+
+/** Frontend page with the "choose a new password" form; gets ?token=… */
+export const RESET_PASSWORD_URL = trimSlash(
+  process.env.RESET_PASSWORD_URL || `${CLIENT_URL}/auth/reset-password`,
+);
+/** Where the backend redirects after a verification link is clicked; gets ?verified=… */
+export const VERIFY_REDIRECT_URL = trimSlash(
+  process.env.VERIFY_EMAIL_REDIRECT_URL || `${CLIENT_URL}/login`,
+);
+
+export class EmailError extends Error {}
+
+export async function sendEmail(to: string, subject: string, html: string, text: string) {
   if (!resend) {
-    console.warn('⚠️ RESEND_API_KEY is not set. Email not sent:');
-    console.warn(`To: ${to}`);
-    console.warn(`Subject: ${subject}`);
+    console.warn(`⚠️ RESEND_API_KEY not set. Email NOT sent → ${to}: "${subject}"\n${text}`);
     return;
   }
 
-  try {
-    const data = await resend.emails.send({
-      from: FROM_EMAIL,
-      to,
-      subject,
-      html,
-    });
-    console.log(`✅ Email sent to ${to} (ID: ${data.data?.id})`);
-    return data;
-  } catch (error) {
-    console.error('❌ Failed to send email:', error);
-    throw new Error('Failed to send email');
+  // The Resend SDK reports API failures in `error` rather than throwing.
+  const { data, error } = await resend.emails.send({ from: FROM, to, subject, html, text });
+  if (error) {
+    console.error(`❌ Resend rejected email to ${to} (from ${FROM}): ${error.name}: ${error.message}`);
+    throw new EmailError(error.message);
   }
+  console.log(`✅ Email sent to ${to} (ID: ${data?.id})`);
+  return data;
 }
 
-/**
- * Send email verification link
- */
-export async function sendVerificationEmail(to: string, token: string) {
-  const verifyLink = `${CLIENT_URL}/verify-email?token=${token}`;
-  
-  const subject = 'Verify your email for Tochiwears';
+function layout(heading: string, intro: string, buttonText: string, link: string, footer: string) {
   const html = `
-    <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2>Welcome to Tochiwears!</h2>
-      <p>Thank you for signing up. Please verify your email address by clicking the link below:</p>
-      <div style="margin: 30px 0;">
-        <a href="${verifyLink}" style="background-color: #000; color: #fff; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block;">Verify Email</a>
-      </div>
-      <p>Or copy and paste this link into your browser:</p>
-      <p><a href="${verifyLink}">${verifyLink}</a></p>
-      <p>If you did not sign up for an account, you can safely ignore this email.</p>
-    </div>
-  `;
-
-  return sendEmail(to, subject, html);
+  <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #111;">
+    <h2 style="margin: 0 0 16px;">${heading}</h2>
+    <p style="line-height: 1.5;">${intro}</p>
+    <p style="margin: 28px 0;">
+      <a href="${link}" style="background: #000; color: #fff; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block;">${buttonText}</a>
+    </p>
+    <p style="line-height: 1.5; font-size: 14px; color: #555;">Or paste this link into your browser:<br><a href="${link}" style="color: #555; word-break: break-all;">${link}</a></p>
+    <p style="line-height: 1.5; font-size: 14px; color: #555;">${footer}</p>
+    <p style="font-size: 13px; color: #999; margin-top: 32px;">Tochiwears</p>
+  </div>`;
+  const text = `${heading}\n\n${intro}\n\n${buttonText}: ${link}\n\n${footer}\n\nTochiwears`;
+  return { html, text };
 }
 
 /**
- * Send password reset link
+ * The link hits the API (GET /auth/verify-email), which verifies and then
+ * redirects to the frontend — so the frontend needs no verification page.
  */
+export async function sendVerificationEmail(to: string, token: string, apiBaseUrl: string) {
+  const link = `${trimSlash(apiBaseUrl)}/auth/verify-email?token=${token}`;
+  const { html, text } = layout(
+    'Welcome to Tochiwears!',
+    'Thanks for signing up. Please confirm your email address. This link expires in 24 hours.',
+    'Verify email',
+    link,
+    "If you didn't create an account, you can ignore this email.",
+  );
+  return sendEmail(to, 'Verify your email for Tochiwears', html, text);
+}
+
 export async function sendPasswordResetEmail(to: string, token: string) {
-  const resetLink = `${CLIENT_URL}/reset-password?token=${token}`;
-  
-  const subject = 'Reset your Tochiwears password';
-  const html = `
-    <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2>Password Reset Request</h2>
-      <p>We received a request to reset your password. Click the link below to choose a new one:</p>
-      <div style="margin: 30px 0;">
-        <a href="${resetLink}" style="background-color: #000; color: #fff; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block;">Reset Password</a>
-      </div>
-      <p>Or copy and paste this link into your browser:</p>
-      <p><a href="${resetLink}">${resetLink}</a></p>
-      <p>If you did not request a password reset, you can safely ignore this email.</p>
-    </div>
-  `;
-
-  return sendEmail(to, subject, html);
+  const link = `${RESET_PASSWORD_URL}?token=${token}`;
+  const { html, text } = layout(
+    'Reset your password',
+    'We received a request to reset your Tochiwears password. This link expires in 1 hour.',
+    'Choose a new password',
+    link,
+    "If you didn't ask for this, you can ignore this email. Your password won't change.",
+  );
+  return sendEmail(to, 'Reset your Tochiwears password', html, text);
 }

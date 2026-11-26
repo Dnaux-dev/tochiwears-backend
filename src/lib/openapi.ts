@@ -189,6 +189,7 @@ export const openApiSpec = {
           phone: nullableString,
           role: { type: 'string', enum: ['customer', 'admin', 'super_admin'] },
           emailVerified: { type: 'boolean' },
+          emailSent: { type: 'boolean', description: 'Signup only: whether the verification email was accepted for delivery' },
         },
       },
       AuthResponse: {
@@ -483,7 +484,8 @@ export const openApiSpec = {
       post: {
         tags: ['Auth'],
         summary: 'Register and sign in',
-        description: 'Sends a verification email linking to CLIENT_URL/verify-email?token=…',
+        description:
+          'Sends a verification email. Its link opens GET /auth/verify-email on this API, which verifies and redirects to the frontend login page with ?verified=success|already|expired|invalid.',
         requestBody: body('SignupRequest'),
         responses: { '201': ok('Created', ref('AuthResponse')), '400': errors['400'], '409': ok('Email already registered') },
       },
@@ -506,7 +508,7 @@ export const openApiSpec = {
       post: {
         tags: ['Auth'],
         summary: 'Email a reset link',
-        description: 'Always returns 200. The link goes to CLIENT_URL/reset-password?token=…',
+        description: 'Always returns 200. The emailed link goes to CLIENT_URL/auth/reset-password?token=…',
         requestBody: body('EmailRequest'),
         responses: { '200': ok('Accepted', ref('Message')) },
       },
@@ -521,11 +523,31 @@ export const openApiSpec = {
       },
     },
     '/auth/verify-email': {
+      get: {
+        tags: ['Auth'],
+        summary: 'Verification link target (opened from the email)',
+        parameters: [{ name: 'token', in: 'query', required: true, schema: { type: 'string' } }],
+        responses: { '302': ok('Redirects to the frontend with ?verified=success|already|expired|invalid') },
+      },
       post: {
         tags: ['Auth'],
-        summary: 'Confirm an email address',
+        summary: 'Confirm an email address (if the frontend handles the token itself)',
         requestBody: body('TokenRequest'),
         responses: { '200': ok('Verified', ref('Message')), '400': errors['400'] },
+      },
+    },
+    '/auth/resend-verification': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Email a new verification link',
+        description: 'Invalidates earlier links. At most once a minute.',
+        security: auth,
+        responses: {
+          '200': ok('Sent', ref('Message')),
+          '400': ok('Already verified'),
+          '429': ok('Requested too recently'),
+          '502': ok('Email provider rejected the message'),
+        },
       },
     },
 
