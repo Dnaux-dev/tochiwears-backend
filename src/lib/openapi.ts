@@ -355,8 +355,9 @@ export const openApiSpec = {
       },
       AddImageRequest: {
         type: 'object',
-        description: 'Provide storageKey (R2 key, prefixed with IMAGE_BASE_URL) or a full url',
+        description: 'Provide publicId (from the Cloudinary upload), or a full url',
         properties: {
+          publicId: { type: 'string', example: 'tochiwears/products/018f.../abc123', description: 'public_id returned by Cloudinary' },
           storageKey: { type: 'string', example: 'products/belt-1.jpg' },
           url: { type: 'string', example: 'https://cdn.example.com/belt-1.jpg' },
           alt: { type: 'string' },
@@ -713,10 +714,38 @@ export const openApiSpec = {
         responses: { '200': ok('Categories now assigned'), ...adminErrors },
       },
     },
+    '/admin/uploads/sign': {
+      post: {
+        tags: ['Admin: Catalogue'],
+        summary: 'Get a signed Cloudinary upload',
+        description: [
+          'Image upload flow:',
+          '1. POST here with { productId }.',
+          '2. In the browser, POST multipart/form-data to data.uploadUrl with `file` plus every key in data.fields.',
+          '3. POST /admin/products/{id}/images with { publicId: <public_id from Cloudinary> }.',
+          'Signatures are valid for 1 hour. JPG, PNG, WebP and AVIF only.',
+        ].join('\n'),
+        security: auth,
+        requestBody: { required: false, ...json({ type: 'object', properties: { productId: { type: 'string', format: 'uuid' } } }) },
+        responses: {
+          '200': ok('Upload parameters', data({
+            type: 'object',
+            properties: {
+              uploadUrl: { type: 'string' },
+              fields: { type: 'object', description: 'api_key, timestamp, folder, allowed_formats, signature' },
+              expiresAt: { type: 'string', format: 'date-time' },
+              maxFileBytes: { type: 'integer' },
+            },
+          })),
+          ...adminErrors,
+          '503': ok('Cloudinary not configured on the server'),
+        },
+      },
+    },
     '/admin/products/{id}/images': {
       post: {
         tags: ['Admin: Catalogue'],
-        summary: 'Attach an image (already uploaded to storage)',
+        summary: 'Attach an uploaded image to a product',
         security: auth,
         parameters: [path('id')],
         requestBody: body('AddImageRequest'),
@@ -726,7 +755,7 @@ export const openApiSpec = {
     '/admin/images/{imageId}': {
       delete: {
         tags: ['Admin: Catalogue'],
-        summary: 'Remove an image',
+        summary: 'Remove an image (also deletes it from Cloudinary)',
         security: auth,
         parameters: [path('imageId')],
         responses: { '200': ok('Deleted'), '404': ok('Not found') },

@@ -14,13 +14,19 @@ import {
   productVariants,
   stockReservations,
 } from '@/db/schema';
+import { cloudinaryEnabled, deliveryUrl, isPublicId } from '@/lib/cloudinary';
 
 const IMAGE_BASE_URL = (process.env.IMAGE_BASE_URL || '').replace(/\/+$/, '');
 
-/** product_images.storage_key is an R2 key; absolute URLs are passed through. */
+/**
+ * product_images.storage_key is a Cloudinary public_id (served optimised),
+ * a key under IMAGE_BASE_URL, or an absolute URL (passed through).
+ */
 export function imageUrl(storageKey: string): string {
-  if (/^https?:\/\//i.test(storageKey) || !IMAGE_BASE_URL) return storageKey;
-  return `${IMAGE_BASE_URL}/${storageKey.replace(/^\/+/, '')}`;
+  if (!isPublicId(storageKey)) return storageKey;
+  if (cloudinaryEnabled) return deliveryUrl(storageKey);
+  if (IMAGE_BASE_URL) return `${IMAGE_BASE_URL}/${storageKey.replace(/^\/+/, '')}`;
+  return storageKey;
 }
 
 export interface Availability {

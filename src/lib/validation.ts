@@ -123,14 +123,21 @@ export const setProductCategoriesSchema = z.object({
 
 export const addProductImageSchema = z
   .object({
-    /** R2 object key, or a full https URL. */
+    /** Cloudinary public_id returned by the upload (preferred). */
+    publicId: z.string().trim().min(1).optional(),
+    /** Other storage key, or a full https URL. */
     storageKey: z.string().trim().min(1).optional(),
     url: z.string().trim().url().optional(),
     alt: optionalText,
     position: z.number().int().nonnegative().optional(),
     colour: optionalText,
   })
-  .refine((v) => v.storageKey || v.url, { message: 'storageKey or url is required' });
+  .refine((v) => v.publicId || v.storageKey || v.url, { message: 'publicId, storageKey or url is required' });
+
+export const signUploadSchema = z.object({
+  /** Put the upload in this product's folder. */
+  productId: uuidParam.optional(),
+});
 
 /* ========================================
    VARIANT VALIDATION

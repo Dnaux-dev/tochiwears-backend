@@ -24,6 +24,14 @@ import { imageUrl } from '@/lib/catalog';
 import { getOrderWithItems, transitionOrder } from '@/lib/orders';
 import { assertStatesFree, withStateCount } from '@/lib/delivery';
 import {
+  cloudinaryEnabled,
+  createUploadSignature,
+  destroy,
+  isOwnPublicId,
+  isPublicId,
+  ROOT_FOLDER,
+} from '@/lib/cloudinary';
+import {
   addProductImageSchema,
   adminOrderListSchema,
   createCategorySchema,
@@ -32,6 +40,7 @@ import {
   createVariantSchema,
   paginationSchema,
   setProductCategoriesSchema,
+  signUploadSchema,
   updateCategorySchema,
   updateDeliveryZoneSchema,
   updateInventorySchema,
@@ -242,9 +251,22 @@ app.put('/products/:id/categories', async (c) => {
    ======================================== */
 
 /**
+ * POST /admin/uploads/sign
+ * Body: { productId? }. Returns a signed Cloudinary upload for the browser:
+ * POST `uploadUrl` as multipart with `file` plus every entry of `fields`,
+ * then register the returned public_id via POST /admin/products/:id/images.
+ */
+app.post('/uploads/sign', async (c) => {
+  if (!cloudinaryEnabled) throw new ApiError(503, 'Image uploads are not configured on the server');
+  const { productId } = await parseBody(c, signUploadSchema);
+  const folder = productId ? `${ROOT_FOLDER}/products/${productId}` : `${ROOT_FOLDER}/products`;
+  return c.json({ data: createUploadSignature(folder) });
+});
+
+/**
  * POST /admin/products/:id/images
- * Body: { storageKey | url, alt?, position?, colour? }
- * Registers an already-uploaded image (R2 key or absolute URL).
+ * Body: { publicId | storageKey | url, alt?, position?, colour? }
+ * Registers an uploaded image. publicId is the Cloudinary public_id.
  */
 app.post('/products/:id/images', async (c) => {
   const productId = idParam(c, 'id');
@@ -256,12 +278,15 @@ app.post('/products/:id/images', async (c) => {
     .where(and(eq(products.id, productId), isNull(products.deletedAt)))
     .limit(1);
   if (!product) throw new ApiError(404, 'Product not found');
+  if (input.publicId && !isOwnPublicId(input.publicId)) {
+    throw new ApiError(400, `publicId must be an image uploaded to the "${ROOT_FOLDER}/" folder`);
+  }
 
   const [image] = await db
     .insert(productImages)
     .values({
       productId,
-      storageKey: (input.storageKey ?? input.url)!,
+      storageKey: (input.publicId ?? input.storageKey ?? input.url)!,
       alt: input.alt ?? null,
       colour: input.colour ?? null,
       position:
@@ -280,7 +305,23 @@ app.delete('/images/:imageId', async (c) => {
   const imageId = idParam(c, 'imageId');
   const [deleted] = await db.delete(productImages).where(eq(productImages.id, imageId)).returning();
   if (!deleted) throw new ApiError(404, 'Image not found');
-  return c.json({ message: 'Image deleted', data: deleted });
+
+  // Remove the file from Cloudinary too, unless another product still uses it.
+  let storage: string = 'kept';
+  if (cloudinaryEnabled && isPublicId(deleted.storageKey) && isOwnPublicId(deleted.storageKey)) {
+    const [stillUsed] = await db
+      .select({ id: productImages.id })
+      .from(productImages)
+      .where(eq(productImages.storageKey, deleted.storageKey))
+      .limit(1);
+    if (!stillUsed) {
+      storage = await destroy(deleted.storageKey).catch((err) => {
+        console.error(`Cloudinary delete failed for ${deleted.storageKey}:`, err);
+        return 'delete_failed';
+      });
+    }
+  }
+  return c.json({ message: 'Image deleted', data: { ...deleted, url: imageUrl(deleted.storageKey), storage } });
 });
 
 /* ========================================
