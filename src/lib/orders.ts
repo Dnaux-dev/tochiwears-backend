@@ -14,7 +14,6 @@ import { db, type DbExecutor, type Tx } from '@/db';
 import {
   coupons,
   cartItems,
-  deliveryZones,
   inventory,
   inventoryMovements,
   orderItems,
@@ -26,6 +25,7 @@ import {
 import { ApiError } from '@/lib/http';
 import { getAvailability } from '@/lib/catalog';
 import { loadCart } from '@/lib/cart';
+import { getDeliveryFee } from '@/lib/delivery';
 import type { CreateOrderInput, OrderStatus } from '@/lib/validation';
 
 const RESERVATION_TTL_MINUTES = Number(process.env.RESERVATION_TTL_MINUTES) || 15;
@@ -97,17 +97,6 @@ async function applyCoupon(tx: Tx, code: string, userId: string, subtotalKobo: n
     .where(eq(coupons.id, coupon.id));
 
   return { code: coupon.code, discountKobo };
-}
-
-/** Cheapest active zone covering the state; 0 if no zone is configured. */
-export async function getDeliveryFee(state: string, executor: DbExecutor = db) {
-  const [zone] = await executor
-    .select({ feeKobo: deliveryZones.feeKobo })
-    .from(deliveryZones)
-    .where(and(eq(deliveryZones.active, true), sql`${state} = any(${deliveryZones.states})`))
-    .orderBy(asc(deliveryZones.feeKobo))
-    .limit(1);
-  return zone?.feeKobo ?? 0;
 }
 
 export async function getOrderWithItems(orderId: string, executor: DbExecutor = db) {

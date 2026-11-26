@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import productsApi, { categoriesApi } from './api/products';
+import deliveryApi from './api/delivery';
 import cartApi from './api/cart';
 import ordersApi from './api/orders';
 import adminApi from './api/admin';
@@ -104,6 +105,7 @@ app.get('/docs', docsHandler);
 
 app.route('/api/products', productsApi);
 app.route('/api/categories', categoriesApi);
+app.route('/api/delivery-fees', deliveryApi);
 
 /* ========================================
    AUTH ROUTES

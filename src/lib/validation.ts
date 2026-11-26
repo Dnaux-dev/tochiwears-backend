@@ -4,6 +4,7 @@
  */
 
 import { z } from 'zod';
+import { NIGERIAN_STATES, normalizeState } from '@/lib/nigeria';
 
 /* ========================================
    SHARED
@@ -220,12 +221,22 @@ export const updateCartItemSchema = z.object({
    ORDER VALIDATION
    ======================================== */
 
-export const DELIVERY_STATES = ['Lagos', 'Abuja', 'Ibadan', 'Kano', 'Others'] as const;
+/** Any of the 36 states + FCT; case-insensitive, "Abuja" → "FCT", "Lagos State" → "Lagos". */
+export const nigerianState = z
+  .string()
+  .transform((v, ctx) => {
+    const state = normalizeState(v);
+    if (!state) {
+      ctx.addIssue({ code: 'custom', message: 'Select a valid Nigerian state' });
+      return z.NEVER;
+    }
+    return state;
+  });
 
 export const createOrderSchema = z.object({
   deliveryAddress: z.string().trim().min(5, 'Address must be at least 5 characters'),
   deliveryCity: z.string().trim().min(2, 'City name required'),
-  deliveryState: z.enum(DELIVERY_STATES, { message: 'Select a valid state' }),
+  deliveryState: nigerianState,
   deliveryPostalCode: optionalText,
   customerNotes: optionalText,
   couponCode: z.string().trim().toUpperCase().optional(),
@@ -255,6 +266,35 @@ export const updateOrderStatusSchema = z.object({
 export const adminOrderListSchema = paginationSchema.extend({
   status: z.enum(ORDER_STATUSES).optional(),
 });
+
+/* ========================================
+   DELIVERY ZONES
+   ======================================== */
+
+const zoneStates = z
+  .array(nigerianState)
+  .min(1, 'A zone needs at least one state')
+  .transform((states) => [...new Set(states)]);
+
+export const createDeliveryZoneSchema = z.object({
+  name: z.string().trim().min(1, 'Zone name is required'),
+  states: zoneStates,
+  feeKobo: kobo,
+  estimatedDaysMin: z.number().int().nonnegative().nullable().optional(),
+  estimatedDaysMax: z.number().int().nonnegative().nullable().optional(),
+  active: z.boolean().default(true),
+});
+
+export const updateDeliveryZoneSchema = z.object({
+  name: z.string().trim().min(1).optional(),
+  states: zoneStates.optional(),
+  feeKobo: kobo.optional(),
+  estimatedDaysMin: z.number().int().nonnegative().nullable().optional(),
+  estimatedDaysMax: z.number().int().nonnegative().nullable().optional(),
+  active: z.boolean().optional(),
+});
+
+export { NIGERIAN_STATES };
 
 /* ========================================
    Type Inference

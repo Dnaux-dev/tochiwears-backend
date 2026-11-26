@@ -3,6 +3,8 @@
  * Keep in sync with src/api/* and src/lib/validation.ts.
  */
 
+import { NIGERIAN_STATES } from '@/lib/nigeria';
+
 type Schema = Record<string, unknown>;
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
@@ -64,6 +66,7 @@ export const openApiSpec = {
       '- Successful responses are wrapped as `{ "data": ... }`; lists may add `pagination`.',
       '- Errors are `{ "error": string, "details"?: object }`. 409 means a conflict (duplicate, stock ran out).',
       '- All money is integer **kobo** (`priceKobo: 250000` = ₦2,500).',
+      '- Delivery: Lagos ₦3,000, elsewhere ₦4,000 by default; admins edit fees via /admin/delivery-zones.',
       '- Stock is held for 15 minutes when an order is placed; payment confirmation turns the hold into a sale.',
     ].join('\n'),
   },
@@ -262,7 +265,11 @@ export const openApiSpec = {
         properties: {
           deliveryAddress: { type: 'string', example: '12 Marina Street, Victoria Island' },
           deliveryCity: { type: 'string', example: 'Lagos' },
-          deliveryState: { type: 'string', enum: ['Lagos', 'Abuja', 'Ibadan', 'Kano', 'Others'] },
+          deliveryState: {
+            type: 'string',
+            enum: [...NIGERIAN_STATES],
+            description: 'One of the 36 states or FCT (case-insensitive; "Abuja" is accepted for FCT). The fee comes from GET /api/delivery-fees.',
+          },
           deliveryPostalCode: { type: 'string' },
           customerNotes: { type: 'string', example: 'Call before delivery' },
           couponCode: { type: 'string', example: 'WELCOME10' },
@@ -418,6 +425,30 @@ export const openApiSpec = {
           adminNotes: { type: 'string' },
         },
       },
+      DeliveryFee: {
+        type: 'object',
+        properties: {
+          state: { type: 'string', example: 'Lagos' },
+          available: { type: 'boolean', description: 'False if no active zone covers this state (checkout will refuse it)' },
+          feeKobo: { ...kobo, nullable: true, example: 300000 },
+          zoneId: { type: 'string', format: 'uuid', nullable: true },
+          zoneName: { ...nullableString, example: 'Lagos' },
+          estimatedDaysMin: { type: 'integer', nullable: true },
+          estimatedDaysMax: { type: 'integer', nullable: true },
+        },
+      },
+      DeliveryZoneRequest: {
+        type: 'object',
+        description: 'A state can belong to only one active zone (409 otherwise).',
+        properties: {
+          name: { type: 'string', example: 'Outside Lagos' },
+          states: { type: 'array', items: { type: 'string', enum: [...NIGERIAN_STATES] } },
+          feeKobo: { ...kobo, example: 400000 },
+          estimatedDaysMin: { type: 'integer', nullable: true, example: 2 },
+          estimatedDaysMax: { type: 'integer', nullable: true, example: 5 },
+          active: { type: 'boolean', default: true },
+        },
+      },
       Customer: {
         type: 'object',
         properties: {
@@ -473,6 +504,14 @@ export const openApiSpec = {
         summary: 'Get a published product by slug',
         parameters: [{ name: 'slug', in: 'path', required: true, schema: { type: 'string' }, example: 'black-leather-belt' }],
         responses: { '200': ok('Product', data(ref('Product'))), '404': ok('Not found or not published') },
+      },
+    },
+    '/api/delivery-fees': {
+      get: {
+        tags: ['Catalogue'],
+        summary: 'Delivery fee for every state',
+        description: 'All 36 states + FCT. Use for the checkout state dropdown and to show the fee before ordering.',
+        responses: { '200': ok('States with fees', list('DeliveryFee')) },
       },
     },
     '/api/categories': {
@@ -821,6 +860,40 @@ export const openApiSpec = {
         security: auth,
         parameters: [path('id')],
         responses: { '200': ok('Customer'), '404': ok('Not found') },
+      },
+    },
+    '/admin/delivery-zones': {
+      get: {
+        tags: ['Admin: Orders & Customers'],
+        summary: 'Delivery zones',
+        security: auth,
+        responses: { '200': ok('Zones with their states and fees') },
+      },
+      post: {
+        tags: ['Admin: Orders & Customers'],
+        summary: 'Create a delivery zone',
+        security: auth,
+        requestBody: body('DeliveryZoneRequest'),
+        responses: { '201': ok('Created'), ...adminErrors, '409': ok('A state is already in another active zone') },
+      },
+    },
+    '/admin/delivery-zones/{id}': {
+      patch: {
+        tags: ['Admin: Orders & Customers'],
+        summary: 'Edit a zone (fee, states, name, active)',
+        description: 'Send only what changes, e.g. { "feeKobo": 350000 }.',
+        security: auth,
+        parameters: [path('id')],
+        requestBody: body('DeliveryZoneRequest'),
+        responses: { '200': ok('Updated'), '404': ok('Not found'), '409': ok('A state is already in another active zone') },
+      },
+      delete: {
+        tags: ['Admin: Orders & Customers'],
+        summary: 'Delete a zone',
+        description: 'States in it become undeliverable until added to another zone.',
+        security: auth,
+        parameters: [path('id')],
+        responses: { '200': ok('Deleted'), '404': ok('Not found') },
       },
     },
     '/admin/stats': {

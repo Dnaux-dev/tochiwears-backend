@@ -8,6 +8,7 @@ import { and, asc, desc, eq, ilike, inArray, isNull, or, sql } from 'drizzle-orm
 import { db } from '@/db';
 import {
   categories,
+  deliveryZones,
   inventory,
   inventoryMovements,
   orders,
@@ -21,15 +22,18 @@ import { getAuth, type AppEnv } from '@/lib/middleware';
 import { ApiError, parseBody, parseQuery } from '@/lib/http';
 import { imageUrl } from '@/lib/catalog';
 import { getOrderWithItems, transitionOrder } from '@/lib/orders';
+import { assertStatesFree, withStateCount } from '@/lib/delivery';
 import {
   addProductImageSchema,
   adminOrderListSchema,
   createCategorySchema,
+  createDeliveryZoneSchema,
   createProductSchema,
   createVariantSchema,
   paginationSchema,
   setProductCategoriesSchema,
   updateCategorySchema,
+  updateDeliveryZoneSchema,
   updateInventorySchema,
   updateOrderStatusSchema,
   updateProductSchema,
@@ -639,6 +643,63 @@ app.get('/customers/:id', async (c) => {
     .orderBy(desc(orders.createdAt));
 
   return c.json({ data: { ...customer, orders: customerOrders } });
+});
+
+/* ========================================
+   DELIVERY ZONES
+   ======================================== */
+
+/**
+ * GET /admin/delivery-zones
+ */
+app.get('/delivery-zones', async (c) => {
+  const zones = await db.select().from(deliveryZones).orderBy(asc(deliveryZones.feeKobo), asc(deliveryZones.name));
+  return c.json({ data: zones.map(withStateCount) });
+});
+
+/**
+ * POST /admin/delivery-zones
+ * Body: { name, states: [...], feeKobo, estimatedDaysMin?, estimatedDaysMax?, active? }
+ */
+app.post('/delivery-zones', async (c) => {
+  const input = await parseBody(c, createDeliveryZoneSchema);
+  const zone = await db.transaction(async (tx) => {
+    if (input.active) await assertStatesFree(input.states, undefined, tx);
+    const [created] = await tx.insert(deliveryZones).values(input).returning();
+    return created;
+  });
+  return c.json({ data: withStateCount(zone) }, 201);
+});
+
+/**
+ * PATCH /admin/delivery-zones/:id
+ * e.g. { feeKobo: 350000 } to change a fee, or { states: [...] } to change coverage.
+ */
+app.patch('/delivery-zones/:id', async (c) => {
+  const id = idParam(c, 'id');
+  const patch = definedOnly(await parseBody(c, updateDeliveryZoneSchema));
+  assertNonEmpty(patch);
+
+  const zone = await db.transaction(async (tx) => {
+    const [current] = await tx.select().from(deliveryZones).where(eq(deliveryZones.id, id)).for('update');
+    if (!current) throw new ApiError(404, 'Delivery zone not found');
+    const willBeActive = patch.active ?? current.active;
+    if (willBeActive) await assertStatesFree(patch.states ?? current.states, id, tx);
+    const [updated] = await tx.update(deliveryZones).set(patch).where(eq(deliveryZones.id, id)).returning();
+    return updated;
+  });
+  return c.json({ data: withStateCount(zone) });
+});
+
+/**
+ * DELETE /admin/delivery-zones/:id
+ * Past orders keep the fee they were charged.
+ */
+app.delete('/delivery-zones/:id', async (c) => {
+  const id = idParam(c, 'id');
+  const [deleted] = await db.delete(deliveryZones).where(eq(deliveryZones.id, id)).returning();
+  if (!deleted) throw new ApiError(404, 'Delivery zone not found');
+  return c.json({ message: 'Delivery zone deleted', data: deleted });
 });
 
 /* ========================================
